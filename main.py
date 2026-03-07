@@ -55,12 +55,12 @@ get_current_dayofweek = lambda action: _now(action).strftime("%A")
 
 
 SLEEPTIME = 0.1  # 每次抢座的间隔（减少到0.05秒以加快速度）
-ENDTIME = "07:00:40"  # 根据学校的预约座位时间+1min即可
+ENDTIME = "17:00:40"  # 根据学校的预约座位时间+1min即可
 
 ENABLE_SLIDER = False  # 是否有滑块验证（调试阶段先关闭）
-ENABLE_TEXTCLICK = True  # 是否有选字验证码（需要图灵云打码平台）
+ENABLE_TEXTCLICK = False  # 是否有选字验证码（需要图灵云打码平台）
 MAX_ATTEMPT = 30  # 最大尝试次数（减少到30次，确保3个配置都能尝试）
-RESERVE_NEXT_DAY = False  # 预约明天而不是今天的
+RESERVE_NEXT_DAY = True  # 预约明天而不是今天的
 
 
 # 是否在每一轮主循环中都重新登录。
@@ -74,12 +74,12 @@ STRATEGY_LOGIN_LEAD_SECONDS = 18
 # STRATEGY_SLIDER_LEAD_SECONDS: 在目标时间前多少秒开始进行验证
 STRATEGY_SLIDER_LEAD_SECONDS = 14
 # FIRST_SUBMIT_OFFSET_MS: 第一次提交时，在目标时间之后再延迟多少毫秒去获取 token 并立即提交
-FIRST_SUBMIT_OFFSET_MS = 100
+FIRST_SUBMIT_OFFSET_MS = 5
 # TARGET_OFFSET2_MS / TARGET_OFFSET3_MS:
 # 在第一次失败后，再额外延迟多少毫秒提交第二 / 第三次带验证码的请求
 # 例如：1200ms、1500ms
-TARGET_OFFSET2_MS = 120
-TARGET_OFFSET3_MS = 1600
+TARGET_OFFSET2_MS = 15
+TARGET_OFFSET3_MS = 160
 
 
 def _get_beijing_target_from_endtime() -> datetime.datetime:
