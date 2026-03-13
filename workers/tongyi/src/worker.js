@@ -450,6 +450,172 @@ async function dispatchUsersInBatches(env, school, users) {
   return { okBatches, totalBatches: batches.length };
 }
 
+function parseSeatIdsRaw(seatidRaw) {
+  if (Array.isArray(seatidRaw)) {
+    return seatidRaw.map(v => String(v || "").trim()).filter(Boolean);
+  }
+  return String(seatidRaw || "")
+    .split(",")
+    .map(v => v.trim())
+    .filter(Boolean);
+}
+
+function normalizeTimesLabel(rawTimes) {
+  if (Array.isArray(rawTimes) && rawTimes.length >= 2) {
+    const start = String(rawTimes[0] || "").trim();
+    const end = String(rawTimes[1] || "").trim();
+    return start && end ? `${start}-${end}` : String(rawTimes || "").trim();
+  }
+  return String(rawTimes || "").trim();
+}
+
+function parseHmsToSeconds(hms) {
+  const text = String(hms || "").trim();
+  const match = text.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+
+  const hour = parseInt(match[1], 10);
+  const minute = parseInt(match[2], 10);
+  const second = parseInt(match[3] || "0", 10);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+    return null;
+  }
+  return hour * 3600 + minute * 60 + second;
+}
+
+function parseTimesRange(rawTimes) {
+  const label = normalizeTimesLabel(rawTimes);
+  const parts = label.split(/-|~|至/).map(s => s.trim()).filter(Boolean);
+  if (parts.length < 2) {
+    return { label, startSec: null, endSec: null, valid: false };
+  }
+
+  const startSec = parseHmsToSeconds(parts[0]);
+  const endSec = parseHmsToSeconds(parts[1]);
+  if (startSec === null || endSec === null || endSec <= startSec) {
+    return { label, startSec: null, endSec: null, valid: false };
+  }
+  return { label, startSec, endSec, valid: true };
+}
+
+function isTimeOverlapped(a, b) {
+  if (a.valid && b.valid) {
+    return a.startSec < b.endSec && b.startSec < a.endSec;
+  }
+  return a.label && b.label && a.label === b.label;
+}
+
+function collectScheduleSeatEntries(schedule) {
+  const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  const entries = [];
+
+  for (const day of days) {
+    const dayCfg = schedule && schedule[day];
+    if (!dayCfg || !dayCfg.enabled) continue;
+
+    const rawSlots = Array.isArray(dayCfg.slots)
+      ? dayCfg.slots
+      : [{
+          roomid: dayCfg.roomid,
+          seatid: dayCfg.seatid,
+          times: dayCfg.times,
+          seatPageId: dayCfg.seatPageId,
+          fidEnc: dayCfg.fidEnc,
+        }];
+
+    for (const slot of rawSlots) {
+      if (!slot || typeof slot !== "object") continue;
+      const roomid = String(slot.roomid || "").trim();
+      const seatList = parseSeatIdsRaw(slot.seatid);
+      const times = parseTimesRange(slot.times);
+      if (!roomid || !times.label || seatList.length === 0) continue;
+
+      for (const seat of seatList) {
+        entries.push({
+          day,
+          roomid,
+          seat,
+          times,
+        });
+      }
+    }
+  }
+
+  return entries;
+}
+
+function dayNameZh(day) {
+  const map = {
+    Monday: "周一",
+    Tuesday: "周二",
+    Wednesday: "周三",
+    Thursday: "周四",
+    Friday: "周五",
+    Saturday: "周六",
+    Sunday: "周日",
+  };
+  return map[day] || day;
+}
+
+async function findSeatConflicts(KV, schoolId, schedule, excludeUserId = "") {
+  const incomingEntries = collectScheduleSeatEntries(schedule);
+  if (incomingEntries.length === 0) return [];
+
+  const userIds = await getSchoolUsers(KV, schoolId);
+  const existingByKey = new Map();
+
+  for (const uid of userIds) {
+    if (excludeUserId && uid === excludeUserId) continue;
+
+    const existingUser = await getUser(KV, schoolId, uid);
+    if (!existingUser || existingUser.status !== "active") continue;
+
+    const owner = existingUser.remark || existingUser.username || existingUser.phone || uid;
+    const existingEntries = collectScheduleSeatEntries(existingUser.schedule || {});
+    for (const entry of existingEntries) {
+      const key = `${entry.day}|${entry.roomid}|${entry.seat}`;
+      const item = {
+        ...entry,
+        userId: uid,
+        owner,
+      };
+      const arr = existingByKey.get(key) || [];
+      arr.push(item);
+      existingByKey.set(key, arr);
+    }
+  }
+
+  const conflicts = [];
+  for (const incoming of incomingEntries) {
+    const key = `${incoming.day}|${incoming.roomid}|${incoming.seat}`;
+    const occupied = existingByKey.get(key) || [];
+    for (const existing of occupied) {
+      if (!isTimeOverlapped(incoming.times, existing.times)) continue;
+      conflicts.push({
+        day: incoming.day,
+        roomid: incoming.roomid,
+        seatid: incoming.seat,
+        times: incoming.times.label,
+        occupiedBy: existing.owner,
+        occupiedUserId: existing.userId,
+        occupiedTimes: existing.times.label,
+      });
+      break;
+    }
+  }
+
+  return conflicts;
+}
+
+function buildSeatConflictError(conflicts) {
+  if (!conflicts.length) return "";
+  const preview = conflicts.slice(0, 3).map(c => (
+    `${dayNameZh(c.day)} 房间${c.roomid} 座位${c.seatid} 时段${c.times} 已被 ${c.occupiedBy} 占用`
+  ));
+  const suffix = conflicts.length > 3 ? `；另有 ${conflicts.length - 3} 条冲突` : "";
+  return `检测到座位冲突：${preview.join("；")}${suffix}`;
+}
+
 // ─── Scheduled Handler ───
 
 async function handleScheduled(env) {
@@ -570,7 +736,19 @@ async function handleAPI(request, env, path) {
     user.username = body.username || "";
     user.password = body.password ? await aesEncrypt(body.password) : "";
     user.remark = body.remark || "";
+    if (body.status === "active" || body.status === "paused") user.status = body.status;
     if (body.schedule) user.schedule = body.schedule;
+
+    if (user.status === "active") {
+      const conflicts = await findSeatConflicts(KV, schoolId, user.schedule || {}, "");
+      if (conflicts.length > 0) {
+        return jsonResp({
+          error: buildSeatConflictError(conflicts),
+          conflicts,
+        }, 409);
+      }
+    }
+
     await saveUser(KV, schoolId, user);
     const userIds = await getSchoolUsers(KV, schoolId);
     if (!userIds.includes(id)) {
@@ -594,6 +772,19 @@ async function handleAPI(request, env, path) {
     const user = await getUser(KV, schoolId, userId);
     if (!user) return jsonResp({ error: "User not found" }, 404);
     const body = await request.json();
+
+    const nextStatus = body.status !== undefined ? body.status : user.status;
+    const nextSchedule = body.schedule ? body.schedule : (user.schedule || {});
+    if (nextStatus === "active") {
+      const conflicts = await findSeatConflicts(KV, schoolId, nextSchedule, userId);
+      if (conflicts.length > 0) {
+        return jsonResp({
+          error: buildSeatConflictError(conflicts),
+          conflicts,
+        }, 409);
+      }
+    }
+
     if (body.phone !== undefined) user.phone = body.phone;
     if (body.username !== undefined) user.username = body.username;
     if (body.password && body.password !== "******") user.password = await aesEncrypt(body.password);
@@ -1718,16 +1909,6 @@ async function doSaveUser() {
   const remark = document.getElementById("edit_user_remark").value.trim();
   if (!phone) return toast("请填写手机号（登录账号）", "error");
   const days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
-  const scheduleJsonText = (document.getElementById("edit_user_schedule_json").value || "").trim();
-  // JSON 映射仅作为“快速填充表单”，最终提交始终以表单中的周计划配置为准。
-  if (scheduleJsonText) {
-    try {
-      const mappedSchedule = parseScheduleJsonMapping(scheduleJsonText);
-      fillScheduleFormFromSchedule(mappedSchedule);
-    } catch (e) {
-      return toast("周计划 JSON 解析失败: " + (e.message || String(e)), "error");
-    }
-  }
 
   const schedule = {};
   days.forEach(d => {
